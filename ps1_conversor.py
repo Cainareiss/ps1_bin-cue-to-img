@@ -2,22 +2,78 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from PIL import Image, ImageTk
 import os
-import subprocess
+from pathlib import Path
 import pygame
 import threading
-from pathlib import Path
 import queue
+import shutil
 
 # -----------------------------
 # Função para criar pastas necessárias
 def create_required_folders():
-    """Cria as pastas 'tools', 'images' e 'audio' no diretório do script, se não existirem."""
-    folders = [Path("tools"), Path("images"), Path("audio")]
+    """Cria as pastas 'images' e 'audio' no diretório do script, se não existirem."""
+    folders = [Path("images"), Path("audio")]
     for folder in folders:
         folder.mkdir(parents=True, exist_ok=True)
 
 # Cria as pastas necessárias ao iniciar o programa
 create_required_folders()
+
+# -----------------------------
+# Função para validar arquivos .bin e .cue
+def validate_bin_cue(bin_file, cue_file):
+    """Valida se os arquivos .bin e .cue são compatíveis e se o .bin referenciado existe."""
+    if not bin_file or not cue_file:
+        return False, "Selecione ambos os arquivos .bin e .cue."
+    
+    # Verifica se os arquivos têm o mesmo nome base
+    bin_base = os.path.splitext(os.path.basename(bin_file))[0]
+    cue_base = os.path.splitext(os.path.basename(cue_file))[0]
+    if bin_base != cue_base:
+        return False, "Os arquivos .bin e .cue devem ter o mesmo nome base."
+    
+    # Verifica se o arquivo .bin referenciado no .cue existe
+    try:
+        with open(cue_file, 'r', encoding='utf-8') as f:
+            for line in f:
+                if line.strip().startswith('FILE'):
+                    bin_name = line.split('"')[1]  # Extrai o nome do arquivo .bin do .cue
+                    bin_path = Path(os.path.dirname(cue_file)) / bin_name
+                    if not bin_path.exists():
+                        return False, f"O arquivo .bin referenciado no .cue ('{bin_name}') não foi encontrado."
+        return True, ""
+    except Exception as e:
+        return False, f"Erro ao ler o arquivo .cue: {e}"
+
+# -----------------------------
+# Função para converter .bin/.cue para .img
+def convert_to_img(bin_file, cue_file, output_folder):
+    """Converte o arquivo .bin para .img com base no .cue."""
+    try:
+        # Lê o arquivo .cue para obter o nome do .bin
+        bin_name = None
+        with open(cue_file, 'r', encoding='utf-8') as f:
+            for line in f:
+                if line.strip().startswith('FILE'):
+                    bin_name = line.split('"')[1]
+                    break
+        if not bin_name:
+            return False, "Nenhum arquivo .bin encontrado no .cue."
+        
+        # Verifica se o .bin referenciado existe
+        bin_path = Path(os.path.dirname(cue_file)) / bin_name
+        if not bin_path.exists():
+            return False, f"Arquivo .bin referenciado ('{bin_name}') não encontrado."
+        
+        # Nome do arquivo de saída
+        base_name = os.path.splitext(os.path.basename(cue_file))[0]
+        output_img = Path(output_folder) / f"{base_name}.img"
+        
+        # Copia o conteúdo do .bin para .img
+        shutil.copyfile(bin_path, output_img)
+        return True, f"Conversão concluída! Arquivo gerado: {output_img}"
+    except Exception as e:
+        return False, f"Erro durante a conversão: {e}"
 
 # -----------------------------
 # Funções do conversor
@@ -35,63 +91,61 @@ def convert():
     cue_file = cue_path.get()
     out_folder = output_path.get()
     
-    if not bin_file or not cue_file or not out_folder:
-        messagebox.showwarning("Aviso", "Selecione todos os arquivos e pasta de saída!")
+    # Valida arquivos
+    is_valid, error_msg = validate_bin_cue(bin_file, cue_file)
+    if not is_valid:
+        messagebox.showwarning("Aviso", error_msg)
+        return
+    
+    if not out_folder:
+        messagebox.showwarning("Aviso", "Selecione a pasta de saída!")
         return
     
     # Desativa o botão de converter para evitar múltiplas conversões
     convert_button.config(state="disabled")
     
-    base_name = os.path.splitext(os.path.basename(bin_file))[0]
-    cue2ccd_path = Path("tools/cue2ccd.exe")  # Caminho relativo para portabilidade
-    
-    if not cue2ccd_path.exists():
-        messagebox.showerror("Erro", f"cue2ccd.exe não encontrado no caminho:\n{cue2ccd_path}\nPor favor, coloque o executável na pasta 'tools/'.")
-        convert_button.config(state="normal")
-        return
-
     # Tela de loading
     loading = tk.Toplevel(root)
     loading.title("Convertendo...")
     loading.geometry("400x100")
     loading_label = tk.Label(loading, text="Iniciando conversão...", font=("Arial", 12))
     loading_label.pack(pady=10)
-    progress = ttk.Progressbar(loading, orient="horizontal", length=300, mode="indeterminate")
+    progress = ttk.Progressbar(loading, orient="horizontal", length=300, mode="determinate")
     progress.pack(pady=10)
-    progress.start(10)  # Inicia animação indeterminada
     
     # Fila para atualizações seguras da interface
     progress_queue = queue.Queue()
 
     def run_conversion():
         try:
-            # Executa cue2ccd
-            process = subprocess.Popen(
-                [str(cue2ccd_path), bin_file, cue_file, str(Path(out_folder) / base_name)],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                universal_newlines=True
-            )
-            for line in process.stdout:
-                progress_queue.put(line.strip())  # Envia saída para a fila
-            process.wait()
-            progress_queue.put(None)  # Sinaliza conclusão
+            # Tamanho do arquivo para a barra de progresso
+            bin_size = os.path.getsize(bin_file)
+            chunk_size = 1024 * 1024  # 1 MB
+            copied_size = 0
+            
+            # Executa a conversão
+            success, msg = convert_to_img(bin_file, cue_file, out_folder)
+            if success:
+                copied_size = bin_size  # Simula conclusão
+                progress_queue.put((100, msg))  # Envia progresso e mensagem
+            else:
+                progress_queue.put((0, msg))  # Envia erro
         except Exception as e:
-            progress_queue.put(f"Erro: {e}")
+            progress_queue.put((0, f"Erro: {e}"))
 
     def check_queue():
         try:
-            msg = progress_queue.get_nowait()
-            if msg is None:
+            percent, msg = progress_queue.get_nowait()
+            progress["value"] = percent
+            loading_label.config(text=msg)
+            if percent == 100 or msg.startswith("Erro:"):
                 loading.destroy()
                 convert_button.config(state="normal")
-                messagebox.showinfo("Sucesso", f"Conversão concluída!\nArquivos gerados na pasta {out_folder}")
-            elif msg.startswith("Erro:"):
-                loading.destroy()
-                convert_button.config(state="normal")
-                messagebox.showerror("Erro", msg)
+                if percent == 100:
+                    messagebox.showinfo("Sucesso", msg)
+                else:
+                    messagebox.showerror("Erro", msg)
             else:
-                loading_label.config(text=f"Convertendo... {msg}")
                 root.after(100, check_queue)
         except queue.Empty:
             root.after(100, check_queue)
